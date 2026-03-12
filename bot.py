@@ -1,35 +1,21 @@
 """
 dHide — Telegram bot for lawful people-lookups.
 
-Public APIs chosen:
-- Phone: Numverify (free tier, requires NUMVERIFY_KEY).
-- Address: OpenStreetMap Nominatim (no key, requires User-Agent).
-- Social: Telegram probe via t.me (no key; checks public profile existence).
-
-Environment variables:
-- BOT_TOKEN       : Telegram Bot API token.
-- NUMVERIFY_KEY   : API key for https://numverify.com/ (free tier works).
-- NOMINATIM_UA    : Optional User-Agent for Nominatim; default "dHide/1.0".
-
-Usage:
-  pip install -r requirements.txt
-  set BOT_TOKEN=...
-  set NUMVERIFY_KEY=...
-  python bot.py
+Enhanced with multi‑platform social search, richer phone/address details.
 """
 
 import asyncio
 import os
 import re
 from enum import Enum
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from aiogram.client.default import DefaultBotProperties
 
 # --- Config ---------------------------------------------------------------
 TOKEN = os.getenv("BOT_TOKEN")
@@ -62,9 +48,9 @@ async def lookup_phone(session: aiohttp.ClientSession, phone: str) -> str:
         "format": 1,
     }
     try:
-        resp = await session.get(url, params=params, timeout=12)
-        data = await resp.json()
-    except Exception as exc:  # noqa: BLE001
+        async with session.get(url, params=params, timeout=12) as resp:
+            data = await resp.json()
+    except Exception as exc:
         return f"Numverify error: {exc}"
 
     if not data.get("valid"):
@@ -73,12 +59,15 @@ async def lookup_phone(session: aiohttp.ClientSession, phone: str) -> str:
     carrier = data.get("carrier") or "n/a"
     country = f'{data.get("country_name", "n/a")} ({data.get("country_code", "")})'
     line = data.get("line_type") or "n/a"
+    location = data.get("location") or "n/a"
     local = data.get("local_format") or phone
     international = data.get("international_format") or phone
+    prefix = data.get("country_prefix") or "n/a"
 
     return (
         "✓ Valid number\n"
-        f"Country: {country}\n"
+        f"Country: {country} (prefix +{prefix})\n"
+        f"Location: {location}\n"
         f"Carrier: {carrier}\n"
         f"Line type: {line}\n"
         f"Local: {local}\n"
@@ -93,56 +82,177 @@ async def lookup_address(session: aiohttp.ClientSession, address: str) -> str:
         "q": address,
         "format": "json",
         "addressdetails": 1,
+        "extratags": 1,
+        "namedetails": 1,
         "limit": 3,
     }
     try:
-        resp = await session.get(url, params=params, headers=headers, timeout=12)
-        data = await resp.json()
-    except Exception as exc:  # noqa: BLE001
+        async with session.get(url, params=params, headers=headers, timeout=12) as resp:
+            data = await resp.json()
+    except Exception as exc:
         return f"Nominatim error: {exc}"
 
     if not data:
         return "No address matches found."
 
     lines: List[str] = []
-    for item in data:
+    for idx, item in enumerate(data, 1):
         name = item.get("display_name", "—")
         lat = item.get("lat", "?")
         lon = item.get("lon", "?")
-        lines.append(f"{name}\nGeo: {lat}, {lon}")
+        bbox = item.get("boundingbox")
+        bbox_str = f"[{bbox[0]}, {bbox[1]}; {bbox[2]}, {bbox[3]}]" if bbox else "n/a"
+        address_details = item.get("address", {})
+        comps = []
+        for key in ["road", "house_number", "city", "town", "village", "postcode", "country"]:
+            if val := address_details.get(key):
+                comps.append(f"{key.replace('_', ' ').title()}: {val}")
+        comp_str = "\n      ".join(comps) if comps else "—"
+
+        lines.append(
+            f"📍 Result #{idx}\n"
+            f"Name: {name}\n"
+            f"Coordinates: {lat}, {lon}\n"
+            f"Bounding box: {bbox_str}\n"
+            f"Address details:\n      {comp_str}"
+        )
 
     return "Top matches:\n\n" + "\n\n".join(lines)
 
 
-def _looks_tg(query: str) -> bool:
-    q = query.lower()
-    return q.startswith("@") or "t.me" in q or "telegram" in q
+# --- Social lookup (multi‑platform) ---------------------------------------
 
 
-async def lookup_social(session: aiohttp.ClientSession, handle: str) -> str:
-    probe = await _telegram_probe(session, handle)
-    return probe or "No social data."
+class Platform:
+    def __init__(self, name: str, url_pattern: str, check_url: Optional[str] = None):
+        self.name = name
+        self.url_pattern = url_pattern  # with {} placeholder for username
+        self.check_url = check_url or url_pattern  # URL to probe (may differ from public profile)
+
+    async def check(self, session: aiohttp.ClientSession, username: str) -> Tuple[bool, str, Optional[Dict]]:
+        """Return (exists, profile_url, extra_info)"""
+        url = self.check_url.format(username)
+        profile_url = self.url_pattern.format(username)
+        try:
+            async with session.head(url, allow_redirects=True, timeout=8) as resp:
+                exists = resp.status < 400
+                return exists, profile_url, None
+        except Exception:
+            return False, profile_url, None
 
 
-async def _telegram_probe(session: aiohttp.ClientSession, query: str) -> str:
-    handle = _extract_tg_handle(query)
-    if not handle:
-        return ""
-    url = f"https://t.me/{handle}"
-    try:
-        resp = await session.head(url, allow_redirects=True, timeout=8)
-        ok = resp.status < 400
-    except Exception as exc:  # noqa: BLE001
-        return f"Telegram probe error: {exc}"
-    status = "exists (public profile/page found)" if ok else "not found"
-    return f"Telegram @{handle}: {status}"
+class InstagramPlatform(Platform):
+    def __init__(self):
+        super().__init__("Instagram", "https://instagram.com/{}", "https://instagram.com/{}/?__a=1")
+
+    async def check(self, session: aiohttp.ClientSession, username: str) -> Tuple[bool, str, Optional[Dict]]:
+        url = self.check_url.format(username)
+        profile_url = self.url_pattern.format(username)
+        try:
+            async with session.get(url, timeout=8) as resp:
+                if resp.status != 200:
+                    return False, profile_url, None
+                data = await resp.json()
+                user = data.get("graphql", {}).get("user", {})
+                if not user:
+                    return False, profile_url, None
+                extra = {
+                    "full_name": user.get("full_name"),
+                    "biography": user.get("biography"),
+                    "followers": user.get("edge_followed_by", {}).get("count"),
+                    "following": user.get("edge_follow", {}).get("count"),
+                    "private": user.get("is_private"),
+                    "verified": user.get("is_verified"),
+                }
+                return True, profile_url, extra
+        except Exception:
+            return False, profile_url, None
 
 
-def _extract_tg_handle(raw: str) -> str:
-    m = re.search(r"(?:t\\.me/|@)([A-Za-z0-9_]{5,})", raw)
-    if m:
-        return m.group(1)
-    return raw[1:] if raw.startswith("@") else ""
+# Define all platforms we want to check
+PLATFORMS: List[Platform] = [
+    Platform("Telegram", "https://t.me/{}"),
+    InstagramPlatform(),
+    Platform("Twitter", "https://twitter.com/{}"),
+    Platform("VK", "https://vk.com/{}"),
+    Platform("Facebook", "https://facebook.com/{}"),
+]
+
+
+def extract_username_from_query(query: str) -> str:
+    """Try to extract a username from various social URLs or plain text."""
+    # Remove common prefixes
+    q = query.strip().lower()
+    # t.me/username, instagram.com/username, etc.
+    patterns = [
+        r"(?:t\.me/|@)([a-z0-9_]{5,})",
+        r"(?:instagram\.com/)([a-z0-9_.]+)",
+        r"(?:twitter\.com/)([a-z0-9_]+)",
+        r"(?:vk\.com/)([a-z0-9_.]+)",
+        r"(?:facebook\.com/)([a-z0-9_.]+)",
+    ]
+    for pat in patterns:
+        match = re.search(pat, q, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    # If no match, assume it's a raw username (alphanumeric + underscore)
+    if re.match(r"^[a-zA-Z0-9_]{3,}$", q):
+        return q
+    return ""
+
+
+async def lookup_social(session: aiohttp.ClientSession, query: str) -> str:
+    username = extract_username_from_query(query)
+    if not username:
+        return "Could not extract a valid username from your input. Please send a username (e.g., @durov) or a profile link."
+
+    lines = [f"🔎 Searching for <b>{username}</b> across platforms:\n"]
+    for platform in PLATFORMS:
+        exists, profile_url, extra = await platform.check(session, username)
+        if exists:
+            line = f"✅ <b>{platform.name}</b>: <a href='{profile_url}'>profile</a>"
+            if extra:
+                # Add Instagram details
+                if platform.name == "Instagram" and extra:
+                    details = []
+                    if extra.get("full_name"):
+                        details.append(f"Name: {extra['full_name']}")
+                    if extra.get("biography"):
+                        bio = extra['biography'][:100] + ("…" if len(extra['biography']) > 100 else "")
+                        details.append(f"Bio: {bio}")
+                    if extra.get("followers") is not None:
+                        details.append(f"👥 {extra['followers']} followers, {extra['following']} following")
+                    if extra.get("private"):
+                        details.append("🔒 Private account")
+                    if extra.get("verified"):
+                        details.append("✅ Verified")
+                    if details:
+                        line += "\n      " + "\n      ".join(details)
+            lines.append(line)
+        else:
+            lines.append(f"❌ {platform.name}: not found")
+
+    return "\n".join(lines)
+
+
+# --- Helper to detect lookup kind ------------------------------------------
+
+
+def detect_kind(query: str) -> LookupKind:
+    # Check for phone (at least 10 digits)
+    digits = "".join(ch for ch in query if ch.isdigit())
+    if len(digits) >= 10:
+        return LookupKind.PHONE
+
+    # Check for explicit social indicators
+    social_patterns = [
+        r"t\.me/", r"@\w", r"instagram\.com/", r"twitter\.com/", r"vk\.com/", r"facebook\.com/",
+    ]
+    if any(re.search(p, query.lower()) for p in social_patterns):
+        return LookupKind.SOCIAL
+
+    # Default to address
+    return LookupKind.ADDRESS
 
 
 # --- Dispatcher -----------------------------------------------------------
@@ -154,7 +264,7 @@ def kind_keyboard() -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(text="📞 Телефон", callback_data=LookupKind.PHONE.value),
         InlineKeyboardButton(text="🏠 Адрес", callback_data=LookupKind.ADDRESS.value),
-        InlineKeyboardButton(text="🌐 Соцсети", callback_data=LookupKind.SOCIAL.value),
+        InlineKeyboardButton(text="🌐 Соцсети (Telegram, Instagram, …)", callback_data=LookupKind.SOCIAL.value),
     ]
     return InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons])
 
@@ -184,15 +294,6 @@ async def cmd_find(message: Message) -> None:
     await message.answer(result, parse_mode=ParseMode.HTML)
 
 
-def detect_kind(query: str) -> LookupKind:
-    digits = "".join(ch for ch in query if ch.isdigit())
-    if len(digits) >= 10:
-        return LookupKind.PHONE
-    if _looks_tg(query):
-        return LookupKind.SOCIAL
-    return LookupKind.ADDRESS
-
-
 @dp.callback_query(F.data.in_({k.value for k in LookupKind}))
 async def on_kind_choice(callback: CallbackQuery) -> None:
     kind = LookupKind(callback.data)
@@ -207,7 +308,7 @@ def format_prompt(kind: LookupKind) -> str:
     mapping = {
         LookupKind.PHONE: "номер телефона (+7XXXXXXXXXX)",
         LookupKind.ADDRESS: "полный адрес",
-        LookupKind.SOCIAL: "ссылку или @username",
+        LookupKind.SOCIAL: "username или ссылку на профиль (Telegram, Instagram, Twitter, VK, Facebook)",
     }
     return mapping[kind]
 
@@ -232,7 +333,6 @@ async def perform_lookup(kind: LookupKind, query: str) -> str:
 
 async def main() -> None:
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    # Ensure no leftover webhook/poller conflicts before starting long polling
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
