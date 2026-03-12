@@ -1,7 +1,8 @@
 """
 dHide — Telegram bot for lawful people-lookups.
 
-Enhanced with multi‑platform social search, richer phone/address details.
+Enhanced Telegram probe: fetches t.me page to extract name, bio, profile photo.
+Mock registration data added for demonstration.
 """
 
 import asyncio
@@ -16,6 +17,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from bs4 import BeautifulSoup
 
 # --- Config ---------------------------------------------------------------
 TOKEN = os.getenv("BOT_TOKEN")
@@ -141,6 +143,42 @@ class Platform:
             return False, profile_url, None
 
 
+class TelegramPlatform(Platform):
+    def __init__(self):
+        super().__init__("Telegram", "https://t.me/{}")
+
+    async def check(self, session: aiohttp.ClientSession, username: str) -> Tuple[bool, str, Optional[Dict]]:
+        url = self.check_url.format(username)
+        profile_url = self.url_pattern.format(username)
+        try:
+            async with session.get(url, timeout=8) as resp:
+                if resp.status != 200:
+                    return False, profile_url, None
+                html = await resp.text()
+                soup = BeautifulSoup(html, 'html.parser')
+
+                # Extract name (from <meta property="og:title"> or <title>)
+                name_tag = soup.find("meta", property="og:title")
+                name = name_tag.get("content") if name_tag else soup.title.string if soup.title else username
+
+                # Extract bio (from <meta property="og:description">)
+                bio_tag = soup.find("meta", property="og:description")
+                bio = bio_tag.get("content") if bio_tag else None
+
+                # Extract profile photo (from <meta property="og:image">)
+                photo_tag = soup.find("meta", property="og:image")
+                photo_url = photo_tag.get("content") if photo_tag else None
+
+                extra = {
+                    "name": name,
+                    "bio": bio,
+                    "photo_url": photo_url,
+                }
+                return True, profile_url, extra
+        except Exception:
+            return False, profile_url, None
+
+
 class InstagramPlatform(Platform):
     def __init__(self):
         super().__init__("Instagram", "https://instagram.com/{}", "https://instagram.com/{}/?__a=1")
@@ -171,7 +209,7 @@ class InstagramPlatform(Platform):
 
 # Define all platforms we want to check
 PLATFORMS: List[Platform] = [
-    Platform("Telegram", "https://t.me/{}"),
+    TelegramPlatform(),
     InstagramPlatform(),
     Platform("Twitter", "https://twitter.com/{}"),
     Platform("VK", "https://vk.com/{}"),
@@ -181,9 +219,7 @@ PLATFORMS: List[Platform] = [
 
 def extract_username_from_query(query: str) -> str:
     """Try to extract a username from various social URLs or plain text."""
-    # Remove common prefixes
     q = query.strip().lower()
-    # t.me/username, instagram.com/username, etc.
     patterns = [
         r"(?:t\.me/|@)([a-z0-9_]{5,})",
         r"(?:instagram\.com/)([a-z0-9_.]+)",
@@ -195,7 +231,6 @@ def extract_username_from_query(query: str) -> str:
         match = re.search(pat, q, re.IGNORECASE)
         if match:
             return match.group(1)
-    # If no match, assume it's a raw username (alphanumeric + underscore)
     if re.match(r"^[a-zA-Z0-9_]{3,}$", q):
         return q
     return ""
@@ -212,8 +247,22 @@ async def lookup_social(session: aiohttp.ClientSession, query: str) -> str:
         if exists:
             line = f"✅ <b>{platform.name}</b>: <a href='{profile_url}'>profile</a>"
             if extra:
-                # Add Instagram details
-                if platform.name == "Instagram" and extra:
+                if platform.name == "Telegram":
+                    details = []
+                    if extra.get("name"):
+                        details.append(f"Name: {extra['name']}")
+                    if extra.get("bio"):
+                        bio = extra['bio'][:200] + ("…" if len(extra['bio']) > 200 else "")
+                        details.append(f"Bio: {bio}")
+                    if extra.get("photo_url"):
+                        details.append(f"🖼️ <a href='{extra['photo_url']}'>Profile photo</a>")
+                    # Mock registration data with disclaimer
+                    details.append("\n⚠️ <i>Registration data below is for demonstration only and not publicly available.</i>")
+                    details.append("📞 Registration phone: +7 (***) ***-**-** (example)")
+                    details.append("📅 Registration date: 2023-05-15 (example)")
+                    if details:
+                        line += "\n      " + "\n      ".join(details)
+                elif platform.name == "Instagram" and extra:
                     details = []
                     if extra.get("full_name"):
                         details.append(f"Name: {extra['full_name']}")
@@ -239,19 +288,16 @@ async def lookup_social(session: aiohttp.ClientSession, query: str) -> str:
 
 
 def detect_kind(query: str) -> LookupKind:
-    # Check for phone (at least 10 digits)
     digits = "".join(ch for ch in query if ch.isdigit())
     if len(digits) >= 10:
         return LookupKind.PHONE
 
-    # Check for explicit social indicators
     social_patterns = [
         r"t\.me/", r"@\w", r"instagram\.com/", r"twitter\.com/", r"vk\.com/", r"facebook\.com/",
     ]
     if any(re.search(p, query.lower()) for p in social_patterns):
         return LookupKind.SOCIAL
 
-    # Default to address
     return LookupKind.ADDRESS
 
 
