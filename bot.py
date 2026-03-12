@@ -308,9 +308,9 @@ dp = Dispatcher()
 
 def kind_keyboard() -> InlineKeyboardMarkup:
     buttons = [
-        InlineKeyboardButton(text="📞 Телефон", callback_data=LookupKind.PHONE.value),
-        InlineKeyboardButton(text="🏠 Адрес", callback_data=LookupKind.ADDRESS.value),
-        InlineKeyboardButton(text="🌐 Соцсети (Telegram, Instagram, …)", callback_data=LookupKind.SOCIAL.value),
+        InlineKeyboardButton(text="Телефон", callback_data=LookupKind.PHONE.value),
+        InlineKeyboardButton(text="Адрес", callback_data=LookupKind.ADDRESS.value),
+        InlineKeyboardButton(text="Соцсети (Telegram, Instagram, …)", callback_data=LookupKind.SOCIAL.value),
     ]
     return InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons])
 
@@ -318,7 +318,7 @@ def kind_keyboard() -> InlineKeyboardMarkup:
 @dp.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     await message.answer(
-        "dHide — поиск сведений для юридических целей.\n"
+        "Добро пожаловать в dHide (@by @dreinnh).\n"
         "Выберите тип запроса или отправьте /find &lt;данные&gt;.",
         reply_markup=kind_keyboard(),
     )
