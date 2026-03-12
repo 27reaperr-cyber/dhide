@@ -163,7 +163,7 @@ def kind_keyboard() -> InlineKeyboardMarkup:
 async def cmd_start(message: Message) -> None:
     await message.answer(
         "dHide — поиск сведений для юридических целей.\n"
-        "Выберите тип запроса или отправьте /find <данные>.",
+        "Выберите тип запроса или отправьте /find &lt;данные&gt;.",
         reply_markup=kind_keyboard(),
     )
 
@@ -198,7 +198,7 @@ async def on_kind_choice(callback: CallbackQuery) -> None:
     kind = LookupKind(callback.data)
     await callback.message.answer(
         f"Отправьте {format_prompt(kind)}.\n"
-        "Можно также использовать команду /find <данные>."
+        "Можно также использовать команду /find &lt;данные&gt;."
     )
     await callback.answer()
 
