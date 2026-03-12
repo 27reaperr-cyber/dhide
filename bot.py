@@ -232,6 +232,8 @@ async def perform_lookup(kind: LookupKind, query: str) -> str:
 
 async def main() -> None:
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    # Ensure no leftover webhook/poller conflicts before starting long polling
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
